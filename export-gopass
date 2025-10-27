@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+
+# Call gopass password store and export that to a Proton Pass compatible CSV file.
+# Assisted by Claude 4.5 Sonnet (Cursor)
+
+set -euo pipefail
+
+# Function to display usage information
+usage() {
+    echo "Usage: $0 [output_file]"
+    echo "Export passwords from GoPass to a Proton Pass compatible CSV file"
+    echo "If output_file is not provided, output goes to stdout"
+    exit 1
+}
+
+# Check if help is requested
+if [ $# -gt 1 ] || [[ "${1:-}" == "-h" ]] || [[ "${1:-}" == "--help" ]]; then
+    usage
+fi
+
+# Set output file (empty means stdout)
+OUTPUT_FILE="${1:-}"
+
+# Function to list all passwords from gopass
+list_passwords() {
+    echo "Listing passwords..." >&2
+    gopass ls -f | grep -v '^\.'
+}
+
+# Function to read password data from gopass
+read_data() {
+    local item="$1"
+
+    echo "Reading data for $item" >&2
+
+    # Get the password entry
+    local data
+    data=$(gopass show "$item" 2>&1)
+
+    # Extract password (first line)
+    local password
+    password=$(echo "$data" | head -n 1 | tr -d '\r\n')
+
+    # Initialize variables
+    local name="$item"
+    local url=""
+    local username=""
+    local note=""
+
+    # Parse remaining lines for metadata
+    while IFS= read -r line; do
+        # Skip comments
+        if [[ "$line" =~ ^# ]]; then
+            continue
+        # Extract URL
+        elif [[ "$line" =~ ^url:[[:space:]]* ]]; then
+            url=$(echo "${line#url:}" | tr -d '[:space:]')
+        # Extract username
+        elif [[ "$line" =~ ^user:[[:space:]]* ]]; then
+            username=$(echo "${line#user:}" | tr -d '[:space:]')
+        # Everything else goes to notes
+        elif [[ -n "$line" ]]; then
+            note="${note} ${line}"
+        fi
+    done < <(echo "$data" | tail -n +2)
+
+    # Output as CSV fields (name, url, email, username, password, note, totp, vault)
+    # email, totp and vault are empty because we don't have them in gopass
+    # Using printf to properly escape CSV fields
+    printf '%s,%s,,%s,%s,%s,,\n' \
+        "$(escape_csv "$name")" \
+        "$(escape_csv "$url")" \
+        "$(escape_csv "$username")" \
+        "$(escape_csv "$password")" \
+        "$(escape_csv "$note")"
+}
+
+# Function to escape CSV fields (handle quotes and commas)
+escape_csv() {
+    local field="$1"
+    # If field contains comma, quote, or newline, wrap in quotes and escape quotes
+    if [[ "$field" =~ [,\"$'\n'] ]]; then
+        field="${field//\"/\"\"}"  # Escape quotes by doubling them
+        echo "\"$field\""
+    else
+        echo "$field"
+    fi
+}
+
+# Main execution
+main() {
+    # Get list of passwords
+    local passwords
+    passwords=$(list_passwords)
+
+    # Write CSV header
+    if [[ -n "$OUTPUT_FILE" ]]; then
+        echo "name,url,email,username,password,note,totp,vault" > "$OUTPUT_FILE"
+    else
+        echo "name,url,email,username,password,note,totp,vault"
+    fi
+
+    # Process each password
+    while IFS= read -r item; do
+        if [[ -n "$item" ]]; then
+            if [[ -n "$OUTPUT_FILE" ]]; then
+                read_data "$item" >> "$OUTPUT_FILE"
+            else
+                read_data "$item"
+            fi
+        fi
+    done <<< "$passwords"
+
+    if [[ -n "$OUTPUT_FILE" ]]; then
+        echo "Export complete! Output written to: $OUTPUT_FILE" >&2
+    else
+        echo "Export complete!" >&2
+    fi
+}
+
+# Run main function
+main
